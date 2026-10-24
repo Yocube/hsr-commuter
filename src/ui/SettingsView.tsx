@@ -35,7 +35,7 @@ export function SettingsView({ state, error, update, onDone }: Props) {
 
       <h2>評估期間</h2>
       <label>
-        首次計算起點(新一期票卡的第一天)
+        起算日(第一次要搭車、或新票卡生效的日子)
         <input
           type="date"
           value={state.startDate}

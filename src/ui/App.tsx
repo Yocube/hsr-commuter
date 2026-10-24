@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { describeDay } from '../calendar/calendar';
-import { extendedEndDate, planTickets } from '../engine/planner';
+import { planTickets } from '../engine/planner';
 import type { PlanResult } from '../engine/types';
 import { loadState, saveState, type AppState } from '../store';
 import { CalendarView } from './CalendarView';
 import { ResultView } from './ResultView';
+import { KIND_LABEL } from './format';
 import { SettingsView } from './SettingsView';
 
 type Tab = 'calendar' | 'result' | 'settings';
@@ -22,7 +23,7 @@ const inputKey = (s: AppState) =>
 export function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [tab, setTab] = useState<Tab>('calendar');
-  const [result, setResult] = useState<{ plan: PlanResult; key: string } | null>(null);
+  const [result, setResult] = useState<{ plan: PlanResult; key: string; startDate: string } | null>(null);
   const [error, setError] = useState('');
   const loaded = useRef(false);
 
@@ -42,16 +43,24 @@ export function App() {
 
   const update = (patch: Partial<AppState>) => setState((s) => (s ? { ...s, ...patch } : s));
 
-  const extendedEnd = useMemo(() => {
-    if (!state || state.endDate < state.startDate) return null;
-    return extendedEndDate(state.startDate, state.endDate, state.prices.periodDays);
-  }, [state?.startDate, state?.endDate, state?.prices.periodDays]);
+  const fresh = state && result && result.key === inputKey(state) ? result.plan : null;
 
-  // 已算過的結果若延長了計算範圍(用完剩餘回數票),行事曆也要開放到那一天供確認
+  // 算過之後,行事曆開放到「已買的票用完」那天,供使用者確認延長範圍內的標記
   const calendarEnd =
-    extendedEnd && result && result.plan.periods[0].start === state?.startDate && result.plan.usageEnd > extendedEnd
-      ? result.plan.usageEnd
-      : extendedEnd;
+    state && state.endDate >= state.startDate
+      ? result && result.startDate === state.startDate && result.plan.usageEnd > state.endDate
+        ? result.plan.usageEnd
+        : state.endDate
+      : null;
+
+  // 各票券的起算日,標在行事曆上(結果過期時不顯示)
+  const marks = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const seg of fresh?.segments ?? []) {
+      if (!seg.book?.existing) m[seg.start] = KIND_LABEL[seg.kind];
+    }
+    return m;
+  }, [fresh]);
 
   if (!state) return <div class="loading">載入中…</div>;
 
@@ -64,7 +73,7 @@ export function App() {
         existingBook: state.existingBook,
         goesToTaipei: (d) => describeDay(d, state.overrides).go,
       });
-      setResult({ plan, key: inputKey(state) });
+      setResult({ plan, key: inputKey(state), startDate: state.startDate });
       setError('');
       setTab('result');
     } catch (e) {
@@ -81,12 +90,13 @@ export function App() {
       </header>
       <main class="content">
         {tab === 'calendar' && (
-          <CalendarView state={state} extendedEnd={calendarEnd} update={update} onGenerate={generate} />
+          <CalendarView state={state} calendarEnd={calendarEnd} marks={marks} update={update} onGenerate={generate} />
         )}
         {tab === 'result' && (
           <ResultView
             result={result?.plan ?? null}
             stale={result !== null && result.key !== inputKey(state)}
+            startDate={result?.startDate ?? state.startDate}
             prices={state.prices}
             onGenerate={generate}
           />

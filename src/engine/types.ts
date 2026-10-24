@@ -36,9 +36,9 @@ export interface OpenBook {
 }
 
 export interface PlanInput {
-  /** 第一期起始日 */
+  /** 第一次要搭乘(或票卡生效)的起算日 */
   startDate: ISODate;
-  /** 目標評估截止日;若落在票期中間,最後一期會算到票期實際到期日 */
+  /** 目標評估截止日:這天以前的每一趟都要有票;已買票券用不完的部分會延長計算到用完 */
   endDate: ISODate;
   prices: Prices;
   /** 該日是否進台北(已套用預設規則與手動覆寫) */
@@ -48,45 +48,46 @@ export interface PlanInput {
   validityExtensions?: DateRange[];
 }
 
-export type PeriodKind = 'monthly' | 'rides' | 'single' | 'none';
+export type TicketKind = 'monthly' | 'rides' | 'single';
 
-export interface BookUse {
+export interface BookDetail {
   firstUse: ISODate;
   /** 效期截止日(含) */
   expiry: ISODate;
-  /** 本期內用掉的趟數 */
-  ridesUsedInPeriod: number;
-  /** 本期結束時剩餘趟數(帶到下一期) */
-  remainingAtPeriodEnd: number;
-  /** 效期內是否有剩餘趟次來不及用完而作廢 */
-  expiredUnused: number;
-  fromPreviousPeriod: boolean;
+  /** 是否為使用者手上原有的回數票(不另外計費) */
+  existing: boolean;
+  /** 實際用掉的趟數 */
+  ridesUsed: number;
+  /** 效期內沒用完而作廢的趟數 */
+  wasted: number;
 }
 
-export interface PeriodPlan {
+/** 一筆購票(或一段連續的零買全票),依時間排列 */
+export interface Segment {
   index: number;
+  kind: TicketKind;
+  /** 首次使用日(月票為起算日) */
   start: ISODate;
+  /** 最後使用日(月票為票期到期日) */
   end: ISODate;
+  /** 該票券涵蓋期間內進台北的天數 */
   goDays: number;
   rides: number;
-  kind: PeriodKind;
-  /** 本期需支出的現金(購票當期計入) */
   cost: number;
-  booksBought: number;
-  singlesBought: number;
-  books: BookUse[];
+  /** kind 為 single 時的張數 */
+  singles: number;
+  book: BookDetail | null;
   /** 全部買全票的對照成本 */
   baselineCost: number;
-  /** 對照全部買全票所省下的金額 */
   savings: number;
-  /** 本期平均每趟成本;沒有搭乘時為 null */
+  /** 平均每趟成本;沒有搭乘時為 null */
   costPerRide: number | null;
 }
 
-/** 最後一期結束後,為了把剩餘回數票用完(或到效期)而延長計算的區段;不需再買票 */
+/** 目標截止日之後,為了把已買的票用完而延長計算的區段;不需再買票 */
 export interface TailUsage {
   start: ISODate;
-  /** 回數票用完當天;若效期先到則為效期截止日 */
+  /** 回數票用完當天(效期先到則為效期截止日);月票則為票期到期日 */
   end: ISODate;
   goDays: number;
   rides: number;
@@ -101,15 +102,14 @@ export interface PlanTotals {
   baselineCost: number;
   savings: number;
   costPerRide: number | null;
+  /** 從起點開始連續每 30 天買一張月票、涵蓋到截止日的總成本 */
   allMonthlyCost: number;
 }
 
 export interface PlanResult {
-  periods: PeriodPlan[];
+  segments: Segment[];
   totals: PlanTotals;
-  /** 最後一期的票期到期日 */
-  extendedEnd: ISODate;
-  /** 剩餘回數票的延長使用區段;沒有剩餘時為 null */
+  /** 目標截止日後用完已買票券的延長區段;沒有時為 null */
   tail: TailUsage | null;
   /** 計算實際涵蓋的最後一天(行事曆需涵蓋到這一天) */
   usageEnd: ISODate;

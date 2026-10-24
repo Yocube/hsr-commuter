@@ -14,5 +14,4 @@ export const KIND_LABEL = {
   monthly: '月票',
   rides: '回數票',
   single: '全票',
-  none: '免購票',
 } as const;
