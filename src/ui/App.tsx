@@ -47,6 +47,12 @@ export function App() {
     return extendedEndDate(state.startDate, state.endDate, state.prices.periodDays);
   }, [state?.startDate, state?.endDate, state?.prices.periodDays]);
 
+  // 已算過的結果若延長了計算範圍(用完剩餘回數票),行事曆也要開放到那一天供確認
+  const calendarEnd =
+    extendedEnd && result && result.plan.periods[0].start === state?.startDate && result.plan.usageEnd > extendedEnd
+      ? result.plan.usageEnd
+      : extendedEnd;
+
   if (!state) return <div class="loading">載入中…</div>;
 
   const generate = () => {
@@ -75,7 +81,7 @@ export function App() {
       </header>
       <main class="content">
         {tab === 'calendar' && (
-          <CalendarView state={state} extendedEnd={extendedEnd} update={update} onGenerate={generate} />
+          <CalendarView state={state} extendedEnd={calendarEnd} update={update} onGenerate={generate} />
         )}
         {tab === 'result' && (
           <ResultView

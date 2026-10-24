@@ -56,8 +56,8 @@ export function CalendarView({ state, extendedEnd, update, onGenerate }: Props) 
     <section>
       {extended && (
         <p class="notice">
-          截止日 {md(endDate)} 落在票期中間,可調整範圍已延伸到票期到期日 {md(extendedEnd)}
-          (淺黃色底),請一併確認這段日子的標記。
+          截止日 {md(endDate)} 之後到 {md(extendedEnd)} 是延伸範圍(補滿最後一個票期、或用完剩餘的回數票,
+          淺黃色底),請一併確認這段日子的標記。
         </p>
       )}
 

@@ -83,6 +83,17 @@ export interface PeriodPlan {
   costPerRide: number | null;
 }
 
+/** 最後一期結束後,為了把剩餘回數票用完(或到效期)而延長計算的區段;不需再買票 */
+export interface TailUsage {
+  start: ISODate;
+  /** 回數票用完當天;若效期先到則為效期截止日 */
+  end: ISODate;
+  goDays: number;
+  rides: number;
+  /** 效期內沒用完而作廢的趟數 */
+  wastedRides: number;
+}
+
 export interface PlanTotals {
   cost: number;
   goDays: number;
@@ -96,6 +107,10 @@ export interface PlanTotals {
 export interface PlanResult {
   periods: PeriodPlan[];
   totals: PlanTotals;
-  /** 實際計算涵蓋的最後一天(票期到期日) */
+  /** 最後一期的票期到期日 */
   extendedEnd: ISODate;
+  /** 剩餘回數票的延長使用區段;沒有剩餘時為 null */
+  tail: TailUsage | null;
+  /** 計算實際涵蓋的最後一天(行事曆需涵蓋到這一天) */
+  usageEnd: ISODate;
 }

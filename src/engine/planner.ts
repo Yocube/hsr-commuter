@@ -6,6 +6,7 @@ import {
   type PeriodPlan,
   type PlanInput,
   type PlanResult,
+  type TailUsage,
   type Prices,
   type DateRange,
 } from './types';
@@ -238,20 +239,45 @@ export function planTickets(input: PlanInput): PlanResult {
     };
   });
 
+  // 最後一期結束時若還有可用的回數票,延長計算到用完(或效期截止)為止
+  const lastEnd = periods[n - 1].end;
+  const leftover = picks[n - 1].carryOut;
+  let tail: TailUsage | null = null;
+  if (leftover) {
+    let remaining = leftover.remaining;
+    let goDays = 0;
+    let rides = 0;
+    let end = leftover.expiry;
+    for (let day = addDays(lastEnd, 1); day <= leftover.expiry; day = addDays(day, 1)) {
+      if (!input.goesToTaipei(day)) continue;
+      goDays += 1;
+      const used = Math.min(RIDES_PER_GO_DAY, remaining);
+      rides += used;
+      remaining -= used;
+      if (remaining === 0) {
+        end = day;
+        break;
+      }
+    }
+    tail = { start: addDays(lastEnd, 1), end, goDays, rides, wastedRides: remaining };
+  }
+
   const cost = plans.reduce((s, p) => s + p.cost, 0);
-  const rides = plans.reduce((s, p) => s + p.rides, 0);
+  const rides = plans.reduce((s, p) => s + p.rides, 0) + (tail?.rides ?? 0);
   const baselineCost = rides * prices.single;
   return {
     periods: plans,
     totals: {
       cost,
-      goDays: plans.reduce((s, p) => s + p.goDays, 0),
+      goDays: plans.reduce((s, p) => s + p.goDays, 0) + (tail?.goDays ?? 0),
       rides,
       baselineCost,
       savings: baselineCost - cost,
       costPerRide: rides > 0 ? cost / rides : null,
       allMonthlyCost: n * prices.monthly,
     },
-    extendedEnd: periods[n - 1].end,
+    extendedEnd: lastEnd,
+    tail,
+    usageEnd: tail ? tail.end : lastEnd,
   };
 }

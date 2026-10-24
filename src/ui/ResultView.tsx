@@ -85,6 +85,16 @@ export function ResultView({ result, stale, prices, onGenerate }: Props) {
         計算範圍 {md(result.periods[0].start)} – {md(result.extendedEnd)}・進台北 {t.goDays} 天、
         {t.rides} 趟。費用按購票當期計入。
       </p>
+      {result.tail && (
+        <p class="notice">
+          最後一期結束時還有回數票沒用完,計算已延長到 {md(result.tail.end)}
+          {result.tail.wastedRides > 0
+            ? `(效期截止,仍有 ${result.tail.wastedRides} 趟用不完而作廢)`
+            : '(剛好用完)'}
+          。延長期間 {md(result.tail.start)}–{md(result.tail.end)} 進台北 {result.tail.goDays} 天、
+          {result.tail.rides} 趟,不另外買票,已計入總趟數與每趟成本。請到「行事曆」確認這段日子的標記。
+        </p>
+      )}
 
       <table class="plan">
         <thead>

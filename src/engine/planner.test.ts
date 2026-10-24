@@ -190,3 +190,30 @@ describe('春節等效期延後區間', () => {
     expect(r.periods[0]).toMatchObject({ kind: 'single', cost: 1120 });
   });
 });
+
+describe('延長計算到剩餘回數票用完', () => {
+  const existing = { remaining: 6, firstUse: '2026-11-20' }; // 效期到 12/19
+
+  it('最後一期用不完的回數票,延長到用完當天(12/2、12/3 共 4 趟)', () => {
+    const r = planTickets(
+      base({ existingBook: existing, goesToTaipei: goOn(['2026-11-02', '2026-12-02', '2026-12-03']) }),
+    );
+    expect(r.periods[0]).toMatchObject({ cost: 0, rides: 2 });
+    expect(r.tail).toEqual({ start: '2026-12-02', end: '2026-12-03', goDays: 2, rides: 4, wastedRides: 0 });
+    expect(r.usageEnd).toBe('2026-12-03');
+    // 延長區段的 4 趟也計入總趟數,CP 值才準確
+    expect(r.totals).toMatchObject({ rides: 6, cost: 0, goDays: 3, baselineCost: 1680, savings: 1680 });
+  });
+
+  it('延長期間內沒用完:算到效期截止日 12/19,剩下 2 趟作廢', () => {
+    const r = planTickets(base({ existingBook: existing, goesToTaipei: goOn(['2026-11-02', '2026-12-02']) }));
+    expect(r.tail).toEqual({ start: '2026-12-02', end: '2026-12-19', goDays: 1, rides: 2, wastedRides: 2 });
+    expect(r.usageEnd).toBe('2026-12-19');
+  });
+
+  it('沒有剩餘回數票就不延長', () => {
+    const r = planTickets(base({ goesToTaipei: goOn(consecutive('2026-11-02', 15)) }));
+    expect(r.tail).toBeNull();
+    expect(r.usageEnd).toBe('2026-12-01');
+  });
+});
