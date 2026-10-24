@@ -1,19 +1,22 @@
 import { useState } from 'preact/hooks';
 import { BUNDLED_HOLIDAYS, describeDay, toggleOverride } from '../calendar/calendar';
-import { daysInMonth, diffDays, weekday, type ISODate } from '../engine/dates';
+import { daysInMonth, weekday, type ISODate } from '../engine/dates';
 import type { AppState } from '../store';
 import { md } from './format';
 
 interface Props {
   state: AppState;
-  extendedEnd: ISODate | null;
+  /** 行事曆可調整的最後一天;null 代表日期設定有誤 */
+  calendarEnd: ISODate | null;
+  /** 各票券的起算日標記(日期 → 票種名稱) */
+  marks: Record<ISODate, string>;
   update: (patch: Partial<AppState>) => void;
   onGenerate: () => void;
 }
 
 const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
 
-export function CalendarView({ state, extendedEnd, update, onGenerate }: Props) {
+export function CalendarView({ state, calendarEnd: extendedEnd, marks, update, onGenerate }: Props) {
   const { startDate, endDate, overrides } = state;
   const [month, setMonth] = useState(() => startDate.slice(0, 7));
 
@@ -49,15 +52,14 @@ export function CalendarView({ state, extendedEnd, update, onGenerate }: Props) 
     (d) => describeDay(d, overrides).overridden,
   ).length;
 
-  const periodLen = state.prices.periodDays;
   const extended = extendedEnd > endDate;
 
   return (
     <section>
       {extended && (
         <p class="notice">
-          截止日 {md(endDate)} 之後到 {md(extendedEnd)} 是延伸範圍(補滿最後一個票期、或用完剩餘的回數票,
-          淺黃色底),請一併確認這段日子的標記。
+          截止日 {md(endDate)} 之後到 {md(extendedEnd)} 是延伸範圍(把已買的票用到期,淺黃色底),
+          請一併確認這段日子的標記。
         </p>
       )}
 
@@ -92,8 +94,6 @@ export function CalendarView({ state, extendedEnd, update, onGenerate }: Props) 
             );
           }
           const info = describeDay(d, overrides);
-          const periodNo = Math.floor(diffDays(startDate, d) / periodLen) + 1;
-          const periodStart = diffDays(startDate, d) % periodLen === 0;
           const cls = [
             'day',
             info.go ? 'go' : 'stay',
@@ -110,7 +110,7 @@ export function CalendarView({ state, extendedEnd, update, onGenerate }: Props) 
             >
               <b>{Number(d.slice(8))}</b>
               <small>{info.label ? info.label.slice(0, 4) : info.kind === 'makeup' ? '補班' : ''}</small>
-              {periodStart && <i class="pstart">第{periodNo}期</i>}
+              {marks[d] && <i class="pstart">{marks[d]}</i>}
             </button>
           );
         })}

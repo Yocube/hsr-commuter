@@ -1,14 +1,11 @@
 import { addDays, diffDays, type ISODate } from './dates';
 import {
   RIDES_PER_GO_DAY,
-  type BookUse,
-  type PeriodKind,
-  type PeriodPlan,
+  type DateRange,
   type PlanInput,
   type PlanResult,
+  type Segment,
   type TailUsage,
-  type Prices,
-  type DateRange,
 } from './types';
 
 /**
@@ -30,254 +27,279 @@ export function bookExpiry(
   }
 }
 
-/** 評估期間需要切成幾個票期(至少 1 期) */
+/** 從起點連續每 periodDays 天買一張月票,涵蓋到截止日需要幾張 */
 export function periodCount(startDate: ISODate, endDate: ISODate, periodDays: number): number {
   const span = diffDays(startDate, endDate) + 1;
   if (span < 1) throw new Error('目標評估截止日不可早於起始日');
   return Math.ceil(span / periodDays);
 }
 
-/** 最後一期的票期到期日;行事曆需涵蓋到這一天 */
-export function extendedEndDate(startDate: ISODate, endDate: ISODate, periodDays: number): ISODate {
-  return addDays(startDate, periodCount(startDate, endDate, periodDays) * periodDays - 1);
-}
-
 interface Book {
-  remaining: number;
-  firstUse: ISODate;
+  rem: number;
   expiry: ISODate;
 }
 
-interface Sim {
-  cost: number;
-  singles: number;
-  books: BookUse[];
-  carryOut: Book | null;
-}
-
-interface Period {
-  index: number;
-  start: ISODate;
-  end: ISODate;
-  /** 進台北的日期 */
-  goDates: ISODate[];
-}
+type Action = 'use' | 'monthly' | 'book' | 'single';
 
 /**
- * 模擬一期的「回數票 + 全票」消耗:
- * - 先用帶入的回數票,過期就作廢
- * - 沒有可用的回數票時,從第 openFromGoDay 個進台北日起才允許新開一本(最多 budget 本),其餘買全票
+ * 產生購票策略。
+ *
+ * 把評估期間內每一趟(進台北一天 = 去程 + 回程 2 趟)依序排好,用動態規劃找出總花費最低的買法:
+ * - 月票:可從任何一個進台北日開始買,涵蓋之後 periodDays 天
+ * - 回數票:第一次刷卡日起算效期,有效期內的趟次一定先用完;用不完的趟次跨假期照樣可用到效期截止
+ * - 單程全票:零星趟次或湊不滿一本時補買
+ * 不預先把時間切成固定的 30 天一格,所以長假前可以先改用回數票收尾,假期結束後再買月票。
  */
-function simulateRides(
-  period: Period,
-  carryIn: Book | null,
-  budget: number,
-  openFromGoDay: number,
-  prices: Prices,
-  extensions: DateRange[],
-): Sim {
-  let current: Book | null = carryIn ? { ...carryIn } : null;
-  const uses: { book: Book; fromPrev: boolean; used: number }[] = [];
-  let currentUse: (typeof uses)[number] | null = null;
-  if (current) {
-    currentUse = { book: current, fromPrev: true, used: 0 };
-    uses.push(currentUse);
-  }
-  let opened = 0;
-  let singles = 0;
-
-  period.goDates.forEach((date, goIdx) => {
-    for (let r = 0; r < RIDES_PER_GO_DAY; r += 1) {
-      if (current && current.remaining > 0 && date <= current.expiry) {
-        current.remaining -= 1;
-        currentUse!.used += 1;
-      } else if (opened < budget && goIdx >= openFromGoDay) {
-        opened += 1;
-        const expiry = bookExpiry(date, prices.periodDays, extensions);
-        current = { remaining: prices.bookRides - 1, firstUse: date, expiry };
-        currentUse = { book: current, fromPrev: false, used: 1 };
-        uses.push(currentUse);
-      } else {
-        singles += 1;
-      }
-    }
-  });
-
-  const nextStart = addDays(period.end, 1);
-  const books: BookUse[] = uses.map((u) => {
-    const stillValid = u.book.expiry >= nextStart;
-    return {
-      firstUse: u.book.firstUse,
-      expiry: u.book.expiry,
-      ridesUsedInPeriod: u.used,
-      remainingAtPeriodEnd: u.book.remaining,
-      expiredUnused: stillValid ? 0 : u.book.remaining,
-      fromPreviousPeriod: u.fromPrev,
-    };
-  });
-  const carryOut =
-    current && current.remaining > 0 && current.expiry >= nextStart ? { ...current } : null;
-  return { cost: opened * prices.book + singles * prices.single, singles, books, carryOut };
-}
-
-interface Choice {
-  kind: PeriodKind;
-  cost: number;
-  singles: number;
-  booksBought: number;
-  books: BookUse[];
-  carryOut: Book | null;
-}
-
-function carryAfterMonthly(carry: Book | null, period: Period): Book | null {
-  return carry && carry.remaining > 0 && carry.expiry >= addDays(period.end, 1) ? carry : null;
-}
-
-/** 列出一期所有可行方案;順序即同價時的優先順序(月票優先) */
-function* options(period: Period, carry: Book | null, input: PlanInput): Generator<Choice> {
-  const { prices } = input;
-  const ext = input.validityExtensions ?? [];
-  yield {
-    kind: 'monthly',
-    cost: prices.monthly,
-    singles: 0,
-    booksBought: 0,
-    books: [],
-    carryOut: carryAfterMonthly(carry, period),
-  };
-  const rides = period.goDates.length * RIDES_PER_GO_DAY;
-  const maxBooks = Math.ceil(rides / prices.bookRides);
-  for (let budget = 0; budget <= maxBooks; budget += 1) {
-    // budget = 0 時延後開本沒有意義,只跑一次
-    const maxSkip = budget === 0 ? 0 : period.goDates.length - 1;
-    for (let skip = 0; skip <= maxSkip; skip += 1) {
-      const sim = simulateRides(period, carry, budget, skip, prices, ext);
-      const booksBought = sim.books.filter((b) => !b.fromPreviousPeriod).length;
-      if (booksBought < budget) continue; // 買不滿預算 = 與較小預算重複
-      const kind: PeriodKind =
-        booksBought > 0 ? 'rides' : sim.singles > 0 ? 'single' : 'none';
-      yield {
-        kind,
-        cost: sim.cost,
-        singles: sim.singles,
-        booksBought,
-        books: sim.books,
-        carryOut: sim.carryOut,
-      };
-    }
-  }
-}
-
-/** 產生購票策略:以動態規劃找出整段期間總花費最低的方案(回數票剩餘趟次可帶入下一期) */
 export function planTickets(input: PlanInput): PlanResult {
-  const { prices } = input;
-  const n = periodCount(input.startDate, input.endDate, prices.periodDays);
+  const { prices, startDate, endDate } = input;
   const ext = input.validityExtensions ?? [];
+  const periodCountForMonthly = periodCount(startDate, endDate, prices.periodDays);
 
-  const periods: Period[] = [];
-  for (let i = 0; i < n; i += 1) {
-    const start = addDays(input.startDate, i * prices.periodDays);
-    const end = addDays(start, prices.periodDays - 1);
-    const goDates: ISODate[] = [];
-    for (let d = 0; d < prices.periodDays; d += 1) {
-      const date = addDays(start, d);
-      if (input.goesToTaipei(date)) goDates.push(date);
-    }
-    periods.push({ index: i, start, end, goDates });
+  // 依序列出每一趟的日期
+  const dates: ISODate[] = [];
+  for (let day = startDate; day <= endDate; day = addDays(day, 1)) {
+    if (input.goesToTaipei(day)) for (let i = 0; i < RIDES_PER_GO_DAY; i += 1) dates.push(day);
   }
+  const total = dates.length;
 
-  let initialCarry: Book | null = null;
+  // 月票從第 r 趟(當天第一趟)起算,涵蓋到哪一趟之前
+  const jumpCache = new Map<number, number>();
+  const jump = (r: number): number => {
+    const hit = jumpCache.get(r);
+    if (hit !== undefined) return hit;
+    const last = addDays(dates[r], prices.periodDays - 1);
+    let k = r;
+    while (k < total && dates[k] <= last) k += 1;
+    jumpCache.set(r, k);
+    return k;
+  };
+
+  const live = (book: Book | null, date: ISODate): Book | null =>
+    book && book.rem > 0 && date <= book.expiry ? book : null;
+  const openBook = (date: ISODate): Book => ({
+    rem: prices.bookRides - 1,
+    expiry: bookExpiry(date, prices.periodDays, ext),
+  });
+  const keyOf = (r: number, b: Book | null) => (b ? `${r}|${b.rem}|${b.expiry}` : `${r}|-`);
+
+  const memo = new Map<string, { cost: number; action: Action }>();
+  const solve = (r: number, book: Book | null): number => {
+    if (r >= total) return 0;
+    const cur = live(book, dates[r]);
+    const key = keyOf(r, cur);
+    const hit = memo.get(key);
+    if (hit) return hit.cost;
+
+    let best: { cost: number; action: Action };
+    if (cur) {
+      // 手上有可用的回數票就一定先用
+      best = { cost: solve(r + 1, { rem: cur.rem - 1, expiry: cur.expiry }), action: 'use' };
+    } else {
+      best = { cost: Infinity, action: 'single' };
+      // 同價時優先順序:月票 > 回數票 > 全票
+      if (r % 2 === 0) {
+        const c = prices.monthly + solve(jump(r), null);
+        if (c < best.cost) best = { cost: c, action: 'monthly' };
+      }
+      const cb = prices.book + solve(r + 1, openBook(dates[r]));
+      if (cb < best.cost) best = { cost: cb, action: 'book' };
+      const cs = prices.single + solve(r + 1, null);
+      if (cs < best.cost) best = { cost: cs, action: 'single' };
+    }
+    memo.set(key, best);
+    return best.cost;
+  };
+
+  let book: Book | null = null;
   if (input.existingBook && input.existingBook.remaining > 0) {
     const expiry = bookExpiry(input.existingBook.firstUse, prices.periodDays, ext);
-    if (expiry >= input.startDate) {
-      initialCarry = {
-        remaining: input.existingBook.remaining,
-        firstUse: input.existingBook.firstUse,
-        expiry,
-      };
-    }
+    if (expiry >= startDate) book = { rem: input.existingBook.remaining, expiry };
   }
+  solve(0, book);
 
-  const memo = new Map<string, { total: number; picks: Choice[] }>();
-  const solve = (i: number, carry: Book | null): { total: number; picks: Choice[] } => {
-    if (i >= n) return { total: 0, picks: [] };
-    const key = `${i}|${carry ? `${carry.remaining}|${carry.expiry}` : '-'}`;
-    const hit = memo.get(key);
-    if (hit) return hit;
-    let best: { total: number; picks: Choice[] } | null = null;
-    for (const choice of options(periods[i], carry, input)) {
-      const rest = solve(i + 1, choice.carryOut);
-      const total = choice.cost + rest.total;
-      if (best === null || total < best.total) {
-        best = { total, picks: [choice, ...rest.picks] };
-      }
-    }
-    memo.set(key, best!);
-    return best!;
+  // 依最佳決策還原每一筆購票
+  const segments: Segment[] = [];
+  const goesSet = (from: ISODate, to: ISODate) => {
+    let n = 0;
+    for (let d = from; d <= to; d = addDays(d, 1)) if (input.goesToTaipei(d)) n += 1;
+    return n;
   };
+  let bookSeg: Segment | null = null;
+  let singleSeg: Segment | null = null;
+  let bookRef: Book | null = book;
+  const bookDays = new Set<ISODate>();
+  const singleDays = new Set<ISODate>();
 
-  const { picks } = solve(0, initialCarry);
+  const push = (seg: Omit<Segment, 'index' | 'baselineCost' | 'savings' | 'costPerRide'>): Segment => {
+    const s: Segment = { ...seg, index: segments.length, baselineCost: 0, savings: 0, costPerRide: null };
+    segments.push(s);
+    return s;
+  };
+  const startExisting = (): Segment => {
+    const b = input.existingBook!;
+    bookDays.clear();
+    return push({
+      kind: 'rides',
+      start: b.firstUse,
+      end: b.firstUse,
+      goDays: 0,
+      rides: 0,
+      cost: 0,
+      singles: 0,
+      book: {
+        firstUse: b.firstUse,
+        expiry: bookExpiry(b.firstUse, prices.periodDays, ext),
+        existing: true,
+        ridesUsed: 0,
+        wasted: 0,
+      },
+    });
+  };
+  if (bookRef) bookSeg = null; // 現有回數票在第一次被用到時才建立區段
 
-  const plans: PeriodPlan[] = periods.map((p, i) => {
-    const c = picks[i];
-    const rides = p.goDates.length * RIDES_PER_GO_DAY;
-    const baselineCost = rides * prices.single;
-    return {
-      index: i,
-      start: p.start,
-      end: p.end,
-      goDays: p.goDates.length,
-      rides,
-      kind: c.kind,
-      cost: c.cost,
-      booksBought: c.booksBought,
-      singlesBought: c.singles,
-      books: c.books,
-      baselineCost,
-      savings: baselineCost - c.cost,
-      costPerRide: rides > 0 ? c.cost / rides : null,
-    };
-  });
-
-  // 最後一期結束時若還有可用的回數票,延長計算到用完(或效期截止)為止
-  const lastEnd = periods[n - 1].end;
-  const leftover = picks[n - 1].carryOut;
-  let tail: TailUsage | null = null;
-  if (leftover) {
-    let remaining = leftover.remaining;
-    let goDays = 0;
-    let rides = 0;
-    let end = leftover.expiry;
-    for (let day = addDays(lastEnd, 1); day <= leftover.expiry; day = addDays(day, 1)) {
-      if (!input.goesToTaipei(day)) continue;
-      goDays += 1;
-      const used = Math.min(RIDES_PER_GO_DAY, remaining);
-      rides += used;
-      remaining -= used;
-      if (remaining === 0) {
-        end = day;
-        break;
-      }
+  let r = 0;
+  while (r < total) {
+    const date = dates[r];
+    // 回數票已過效期:剩下的趟次作廢
+    if (bookRef && bookRef.rem > 0 && date > bookRef.expiry && bookSeg?.book) {
+      bookSeg.book.wasted += bookRef.rem;
     }
-    tail = { start: addDays(lastEnd, 1), end, goDays, rides, wastedRides: remaining };
+    const cur = live(bookRef, date);
+    const decision = memo.get(keyOf(r, cur))!;
+    if (decision.action === 'use') {
+      if (!bookSeg) bookSeg = startExisting();
+      bookSeg.rides += 1;
+      bookSeg.book!.ridesUsed += 1;
+      bookSeg.end = date;
+      bookDays.add(date);
+      bookSeg.goDays = bookDays.size;
+      bookRef = { rem: cur!.rem - 1, expiry: cur!.expiry };
+      singleSeg = null;
+      r += 1;
+    } else if (decision.action === 'monthly') {
+      const end = addDays(date, prices.periodDays - 1);
+      const days = goesSet(date, end);
+      push({
+        kind: 'monthly',
+        start: date,
+        end,
+        goDays: days,
+        rides: days * RIDES_PER_GO_DAY,
+        cost: prices.monthly,
+        singles: 0,
+        book: null,
+      });
+      bookRef = null;
+      bookSeg = null;
+      singleSeg = null;
+      r = jump(r);
+    } else if (decision.action === 'book') {
+      const expiry = bookExpiry(date, prices.periodDays, ext);
+      bookDays.clear();
+      bookDays.add(date);
+      bookSeg = push({
+        kind: 'rides',
+        start: date,
+        end: date,
+        goDays: 1,
+        rides: 1,
+        cost: prices.book,
+        singles: 0,
+        book: { firstUse: date, expiry, existing: false, ridesUsed: 1, wasted: 0 },
+      });
+      bookRef = { rem: prices.bookRides - 1, expiry };
+      singleSeg = null;
+      r += 1;
+    } else {
+      if (!singleSeg) {
+        singleDays.clear();
+        singleSeg = push({
+          kind: 'single',
+          start: date,
+          end: date,
+          goDays: 0,
+          rides: 0,
+          cost: 0,
+          singles: 0,
+          book: null,
+        });
+      }
+      singleSeg.singles += 1;
+      singleSeg.rides += 1;
+      singleSeg.cost += prices.single;
+      singleSeg.end = date;
+      singleDays.add(date);
+      singleSeg.goDays = singleDays.size;
+      bookRef = null;
+      bookSeg = null;
+      r += 1;
+    }
   }
 
-  const cost = plans.reduce((s, p) => s + p.cost, 0);
-  const rides = plans.reduce((s, p) => s + p.rides, 0) + (tail?.rides ?? 0);
+  // 目標截止日之後:把已買的票用完(月票算到票期到期日、回數票算到用完或效期截止)
+  let tail: TailUsage | null = null;
+  const afterEnd = addDays(endDate, 1);
+  const lastSeg = segments[segments.length - 1];
+  if (lastSeg?.kind === 'monthly' && lastSeg.end >= afterEnd) {
+    tail = {
+      start: afterEnd,
+      end: lastSeg.end,
+      goDays: goesSet(afterEnd, lastSeg.end),
+      rides: goesSet(afterEnd, lastSeg.end) * RIDES_PER_GO_DAY,
+      wastedRides: 0,
+    };
+  } else if (bookRef && bookRef.rem > 0 && bookRef.expiry >= afterEnd) {
+    const seg = bookSeg ?? (input.existingBook ? startExisting() : null);
+    if (seg?.book) {
+      let rem = bookRef.rem;
+      let goDays = 0;
+      let rides = 0;
+      let end = bookRef.expiry;
+      for (let day = afterEnd; day <= bookRef.expiry; day = addDays(day, 1)) {
+        if (!input.goesToTaipei(day)) continue;
+        goDays += 1;
+        const used = Math.min(RIDES_PER_GO_DAY, rem);
+        rides += used;
+        rem -= used;
+        seg.book.ridesUsed += used;
+        seg.rides += used;
+        seg.end = day;
+        if (rem === 0) {
+          end = day;
+          break;
+        }
+      }
+      seg.goDays += goDays;
+      seg.book.wasted += rem;
+      tail = { start: afterEnd, end, goDays, rides, wastedRides: rem };
+    }
+  } else if (bookRef && bookRef.rem > 0 && bookSeg?.book) {
+    // 效期在截止日前就到了
+    bookSeg.book.wasted += bookRef.rem;
+  }
+
+  for (const s of segments) {
+    s.baselineCost = s.rides * prices.single;
+    s.savings = s.baselineCost - s.cost;
+    s.costPerRide = s.rides > 0 ? s.cost / s.rides : null;
+  }
+
+  const usageEnd = tail ? tail.end : endDate;
+  const cost = segments.reduce((sum, s) => sum + s.cost, 0);
+  const rides = segments.reduce((sum, s) => sum + s.rides, 0);
   const baselineCost = rides * prices.single;
   return {
-    periods: plans,
+    segments,
     totals: {
       cost,
-      goDays: plans.reduce((s, p) => s + p.goDays, 0) + (tail?.goDays ?? 0),
+      goDays: goesSet(startDate, usageEnd),
       rides,
       baselineCost,
       savings: baselineCost - cost,
       costPerRide: rides > 0 ? cost / rides : null,
-      allMonthlyCost: n * prices.monthly,
+      allMonthlyCost: periodCountForMonthly * prices.monthly,
     },
-    extendedEnd: lastEnd,
     tail,
-    usageEnd: tail ? tail.end : lastEnd,
+    usageEnd,
   };
 }
